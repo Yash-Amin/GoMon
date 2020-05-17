@@ -50,6 +50,7 @@ func getLinks(pageURL string, res string) []string {
 	}
 
 	getAttributeOfElement(doc, "a", "href", &values)
+	// TODO: Forms, images, link, script, meta, video, audio ...
 	for i, value := range values {
 		values[i] = getAbsoluteURL(pageURL, value)
 	}
