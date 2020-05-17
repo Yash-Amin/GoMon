@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"golang.org/x/net/html"
 	"io/ioutil"
@@ -14,13 +15,25 @@ import (
 )
 
 // Flag inputs
-var crawlIncludePathRegexString = "test"
+type inputURLArgs []string
+
+func (values *inputURLArgs) Set(value string) error {
+	*values = append(*values, value)
+	return nil
+}
+
+func (values inputURLArgs) String() string {
+	return strings.Join(values, ",")
+}
+
+var crawlIncludePathRegexString = ".*"
 var crawlExcludePathRegexString = "^a" // match nothing
 var downloadIncludePathRegexString = ".*"
 var downloadExcludePathRegexString = "^a" // match nothing
-var downloadExtensionsRegexString = "png"
+var downloadExtensionsRegexString = "."
 var outputDir = "test/output"
 var download = true
+var startURLs inputURLArgs
 
 // Todo: status code
 // Todo: mimetype
@@ -55,6 +68,10 @@ func getAbsoluteURL(base string, path string) string {
 }
 
 func getAttributeOfElement(node *html.Node, tag string, attribute string, values *[]string) {
+	if node == nil {
+		return
+	}
+
 	var scraper func(*html.Node)
 	attribute = strings.ToLower(attribute) // ??? should convert to lowercase or not?
 
@@ -82,6 +99,7 @@ func getLinks(pageURL string, res string) []string {
 	}
 
 	getAttributeOfElement(doc, "a", "href", &values)
+	getAttributeOfElement(doc, "img", "src", &values)
 	// TODO: Forms, images, link, script, meta, video, audio ...
 	for i, value := range values {
 		values[i] = getAbsoluteURL(pageURL, value)
@@ -112,6 +130,15 @@ func getURLPath(_url string) string {
 	return parsed.Path
 }
 
+// Returns URL's host
+func getURLHost(_url string) string {
+	parsed, err := url.Parse(_url)
+	if err != nil {
+		return ""
+	}
+	return parsed.Host
+}
+
 // Matches crawl-regex
 func shouldCrawl(url string) bool {
 	urlBytes := []byte(url)
@@ -130,19 +157,31 @@ func shouldSave(path string) bool {
 		ext = ""
 	}
 
-	return downloadIncludePathRegex.Match([]byte(path)) &&
-		downloadExtensionsRegex.Match([]byte(ext))
+	return (downloadIncludePathRegex.Match([]byte(path)) &&
+		downloadExtensionsRegex.Match([]byte(ext)))
 }
 
-// Creates directories, and writes to file
+// Creates directories, and writes to file.
+//
+// Error!
+// Some URLs like "http://example.com/dir/" and "http://example.com/dir/file.html"
+// will cause error, because in 2nd URL path is "dir/file.html" so output path
+// of that URL will be "outputDir/dir/file.html" but for first URL, the directory
+// dir already exists and we can not create file with the same name! so we need to
+// change the name.
 func save(path string, data []byte) {
-	path = outputDir + path
+	path = outputDir + "/" + path
+	path = strings.ReplaceAll(path, "//", "/")
+	if strings.HasSuffix(path, "/") {
+		path += "__index__" // add random string
+	}
 	dirPath := filepath.Dir(path)
 	os.MkdirAll(dirPath, 0777)
-
 	f, err := os.Create(path)
 	if err != nil {
-		panic(err)
+		fmt.Println("ERROR:", path)
+		// panic(err)
+		return // TODO: Fix this
 	}
 
 	defer f.Close()
@@ -160,8 +199,11 @@ func process(c chan string, url string) {
 	if err != nil {
 		return
 	}
-	defer response.Body.Close()
-
+	defer func() {
+		if response != nil {
+			response.Body.Close()
+		}
+	}()
 	bytes, err := ioutil.ReadAll(response.Body)
 	if err != nil {
 		return
@@ -187,8 +229,9 @@ func process(c chan string, url string) {
 
 	// Save current request body
 	currentURLPath := getURLPath(url)
+	currentURLHost := getURLHost(url)
 	if shouldSave(currentURLPath) {
-		save(currentURLPath, bytes)
+		save(currentURLHost+"/"+currentURLPath, bytes)
 	}
 
 	// _ = body
@@ -205,7 +248,7 @@ func crawler(c chan string) {
 	}
 }
 
-func startCrawler(url string) {
+func startCrawler(urls []string) {
 	var connections = 20
 
 	c := make(chan string)
@@ -215,16 +258,49 @@ func startCrawler(url string) {
 		go crawler(c)
 	}
 
-	urlsWG.Add(1)
-	go addURL(c, url)
+	for _, url := range urls {
+		urlsWG.Add(1)
+		go addURL(c, url)
+	}
 
 	urlsWG.Wait()
 	close(c)
 	crawlerWG.Wait()
 }
 
+func flagParse() {
+
+	var crawlIncludePathRegexString = ".*"
+	var crawlExcludePathRegexString = "^a" // match nothing
+	var downloadIncludePathRegexString = ".*"
+	var downloadExcludePathRegexString = "^a" // match nothing
+	var downloadExtensionsRegexString = "png"
+	var outputDir = "test/output"
+	var download = true
+	flag.Var(&startURLs, "u", "Specify the URL(s) for cralwer")
+	flag.StringVar(&crawlIncludePathRegexString, "crawlInclude", ".*", "Regex to include URLs for crawler")
+	flag.StringVar(&crawlExcludePathRegexString, "crawlExclude", "^a", "Regex to exclude URLs for crawler")
+	flag.StringVar(&downloadIncludePathRegexString, "downloadInclude", ".*", "Regex to include URLs for downloader")
+	flag.StringVar(&downloadExcludePathRegexString, "downloadExclude", "^a", "Regex to exclude URLs for downloader")
+	flag.StringVar(&downloadExtensionsRegexString, "downloadExtension", ".*", "Regex to match extensions of URL for downloader")
+	flag.StringVar(&outputDir, "output", "output", "Output directory location")
+	flag.BoolVar(&download, "download", false, "Enable/Disable saving requests")
+
+	flag.Parse()
+
+	crawlIncludePathRegex = regexp.MustCompile(crawlIncludePathRegexString)
+	crawlExcludePathRegex = regexp.MustCompile(crawlExcludePathRegexString)
+	downloadExtensionsRegex = regexp.MustCompile(downloadExtensionsRegexString)
+	downloadIncludePathRegex = regexp.MustCompile(downloadIncludePathRegexString)
+	downloadExcludePathRegex = regexp.MustCompile(downloadExcludePathRegexString)
+
+	if len(startURLs) == 0 {
+		fmt.Println("Error:\n\tNo URL specified.")
+		os.Exit(2)
+	}
+}
+
 func main() {
-	fmt.Println("--------------------------------------")
-	url := "http://localhost/"
-	startCrawler(url)
+	flagParse()
+	startCrawler(startURLs)
 }
